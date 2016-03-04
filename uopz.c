@@ -229,12 +229,18 @@ static inline void uopz_backup(zend_class_entry *clazz, zend_string *name, zend_
 	HashTable *table = clazz ? &clazz->function_table : CG(function_table);
 	HashTable *backups = zend_hash_index_find_ptr(&UOPZ(backup), (zend_long) table);
 	uopz_backup_t backup;
+	zend_string *lower = zend_string_tolower(name);
 
 	if (!backups) {
 		ALLOC_HASHTABLE(backups);
 		zend_hash_init(backups, 8, NULL, uopz_backup_dtor, 0);
 		zend_hash_index_add_ptr(
 			&UOPZ(backup), (zend_long) table, backups);
+	}
+	
+	if (zend_hash_exists(backups, lower)) {
+		zend_string_release(lower);
+		return;
 	}
 
 	memset(&backup, 0, sizeof(uopz_backup_t));	
@@ -243,10 +249,12 @@ static inline void uopz_backup(zend_class_entry *clazz, zend_string *name, zend_
 	backup.table    = table;
 	backup.name		= zend_string_copy(name);
 
-	if (!zend_hash_add_mem(backups, backup.name, &backup, sizeof(uopz_backup_t))) {
+	if (!zend_hash_add_mem(backups, lower, &backup, sizeof(uopz_backup_t))) {
 		destroy_zend_function(backup.function);
 		zend_string_release(name);
 	}
+
+	zend_string_release(lower);
 } /* }}} */
 
 /* {{{ */
@@ -1157,22 +1165,24 @@ static inline zend_bool uopz_function(zend_class_entry *clazz, zend_string *name
 	zend_function *function =  (zend_function*) zend_get_closure_method_def(closure);
 	zend_string *lower = zend_string_tolower(name);
 
-	if (!flags) {
-		/* get flags from original function */
-		if (uopz_find_function(table, lower, &destination) == SUCCESS) {
-			flags = 
-				destination->common.fn_flags;
-			/* backup existing functions */
-			uopz_backup(clazz, lower, destination);
-		} else {
-			/* set flags to sensible default */
-			flags = ZEND_ACC_PUBLIC;
+	if (uopz_find_function(table, lower, &destination) == SUCCESS) {
+		if (!flags) {
+			flags = destination->common.fn_flags;
 		}
+		uopz_backup(clazz, lower, destination);
+	} else if (!flags) {
+		/* set flags to sensible default */
+		flags = ZEND_ACC_PUBLIC;
 	}
 
 	function = uopz_copy_function(clazz, function);
 
-	if (!zend_hash_update_ptr(table, lower, function)) {
+	dtor_func_t orig_dtor = table->pDestructor;
+	table->pDestructor = NULL;
+	void *update_result = zend_hash_update_ptr(table, lower, function);
+	table->pDestructor = orig_dtor;
+
+	if (!update_result) {
 		zend_arena_release(&CG(arena), function);
 		zend_string_release(lower);
 
